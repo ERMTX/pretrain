@@ -28,7 +28,7 @@ class Av2Dataset(Dataset):
             self.load = False
         else:
             raise ValueError("Either cached_split or extractor must be specified")
-
+        print(cached_split, extractor)
         print(
             f"data root: {data_root}/{cached_split}, total number of files: {len(self.file_list)}"
         )

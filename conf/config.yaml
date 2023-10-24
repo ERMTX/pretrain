@@ -9,7 +9,7 @@ save_top_k: 10
 
 data_root:
 checkpoint:
-pretrained_weights:
+pretrained_weights: /home/fu/argoverse2_forcast_mae/pretrain_ckpt
 output: ${model.name}-${model.phase}
 
 # trainer

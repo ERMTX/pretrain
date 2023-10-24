@@ -194,12 +194,13 @@ class ModelMAE(nn.Module):
             dim=-1,
         )
         B, N, L, D = hist_feat.shape
+        # [batch,36,50,4]
         hist_feat = hist_feat.view(B * N, L, D)
         hist_feat = self.hist_embed(hist_feat.permute(0, 2, 1).contiguous())
         hist_feat = hist_feat.view(B, N, hist_feat.shape[-1])
 
         future_padding_mask = data["x_padding_mask"][:, :, 50:]
-        future_feat = torch.cat([data["y"], ~future_padding_mask[..., None]], dim=-1)
+        future_feat = torch.cat([data["y"], ~future_padding_mask[..., None]], dim=-1) #[batch, 36, 128]
         B, N, L, D = future_feat.shape
         future_feat = future_feat.view(B * N, L, D)
         future_feat = self.future_embed(future_feat.permute(0, 2, 1).contiguous())
@@ -208,7 +209,7 @@ class ModelMAE(nn.Module):
         lane_padding_mask = data["lane_padding_mask"]
         lane_normalized = data["lane_positions"] - data["lane_centers"].unsqueeze(-2)
         lane_feat = torch.cat([lane_normalized, ~lane_padding_mask[..., None]], dim=-1)
-        B, M, L, D = lane_feat.shape
+        B, M, L, D = lane_feat.shape  # [batch,200,20,3] #todo:200stand for what?
         lane_feat = self.lane_embed(lane_feat.view(-1, L, D).contiguous())
         lane_feat = lane_feat.view(B, M, -1)
 
@@ -251,7 +252,7 @@ class ModelMAE(nn.Module):
             future_padding_mask,
             data["num_actors"],
         )
-
+        #[batch,36,128]-->[batch,20,128]
         lane_mask_ratio = self.lane_mask_ratio
         (
             lane_masked_tokens,
@@ -260,7 +261,7 @@ class ModelMAE(nn.Module):
         ) = self.lane_random_masking(
             lane_feat, lane_mask_ratio, data["lane_key_padding_mask"]
         )
-
+        #[batch,145,128]-->[batch,73,128]
         x = torch.cat(
             [hist_masked_tokens, fut_masked_tokens, lane_masked_tokens], dim=1
         )
@@ -268,7 +269,7 @@ class ModelMAE(nn.Module):
             [hist_key_padding_mask, fut_key_padding_mask, lane_key_padding_mask],
             dim=1,
         )
-
+        # [batch,110(20+17+73),128]
         for blk in self.blocks:
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
@@ -321,7 +322,7 @@ class ModelMAE(nn.Module):
 
         x_decoder = self.decoder_norm(x_decoder)
         hist_token = x_decoder[:, :N].reshape(-1, self.embed_dim)
-        future_token = x_decoder[:, N : 2 * N].reshape(-1, self.embed_dim)
+        future_token = x_decoder[:, N: 2 * N].reshape(-1, self.embed_dim)
         lane_token = x_decoder[:, -M:]
 
         # lane pred loss

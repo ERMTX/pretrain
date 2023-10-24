@@ -8,6 +8,7 @@ from .layers.agent_embedding import AgentEmbeddingLayer
 from .layers.lane_embedding import LaneEmbeddingLayer
 from .layers.multimodal_decoder import MultimodalDecoder
 from .layers.transformer_blocks import Block
+from .layers.transformer_decoder import InitialDecoder, InteractionDecoder, FutureEncoder
 
 
 class ModelForecast(nn.Module):
@@ -54,6 +55,12 @@ class ModelForecast(nn.Module):
             nn.Linear(embed_dim, 256), nn.ReLU(), nn.Linear(256, future_steps * 2)
         )
 
+        self.first_layer_decoder = InitialDecoder(6, 0, future_steps)
+        self.decoder_layer_num = 3
+        future_encoder = FutureEncoder()
+        self.interaction_stage = nn.ModuleList([InteractionDecoder(future_encoder, future_steps) for _ in range(self.decoder_layer_num)])
+
+
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -76,6 +83,7 @@ class ModelForecast(nn.Module):
         state_dict = {
             k[len("net.") :]: v for k, v in ckpt.items() if k.startswith("net.")
         }
+        print('load_ckpy_modules: ',state_dict.keys())
         return self.load_state_dict(state_dict=state_dict, strict=False)
 
     def forward(self, data):
@@ -91,6 +99,7 @@ class ModelForecast(nn.Module):
         )
 
         B, N, L, D = hist_feat.shape
+        #[batch,35,50,4]
         hist_feat = hist_feat.view(B * N, L, D)
         hist_feat_key_padding = hist_key_padding_mask.view(B * N)
         actor_feat = self.hist_embed(
@@ -128,18 +137,54 @@ class ModelForecast(nn.Module):
         )
 
         x_encoder = x_encoder + pos_embed
+        #[batch,181,128]
         for blk in self.blocks:
             x_encoder = blk(x_encoder, key_padding_mask=key_padding_mask)
         x_encoder = self.norm(x_encoder)
+        previous_encoder = x_encoder.detach()
 
-        x_agent = x_encoder[:, 0]
+        x_agent = x_encoder[:, 0] #[batch,128]
         y_hat, pi = self.decoder(x_agent)
 
-        x_others = x_encoder[:, 1:N]
-        y_hat_others = self.dense_predictor(x_others).view(B, -1, 60, 2)
+
+        #first_layer_decoder,将所有的特征作为key与value
+        decoder_outputs = {}
+        target_current_state = data['x_positions'][:,0,-1,:]
+        results = self.first_layer_decoder(0, target_current_state, x_encoder, key_padding_mask)
+        last_content = results[0]
+        last_level = results[1]
+        last_scores = results[2]
+        decoder_outputs['level_0_interactions'] = last_level
+        decoder_outputs['level_0_scores'] = last_scores
+
+
+
+
+        #todo: 完善current_state中所需的参数
+        # for k in range(1, self.decoder_layer_num+1):
+        #     interaction_decoder = self.interaction_stage[k-1]
+        #     results = interaction_decoder(0, target_current_state.unsqueeze(1), last_level.unsqueeze(1), last_scores.unsqueeze(1), \
+        #                last_content.unsqueeze(1), x_encoder.unsqueeze(1), key_padding_mask.unsqueeze(1))
+        #     # last_content: 上一层的[batch,2,6,256]
+        #     last_content = results[0]
+        #     # last_level: 预测轨迹【batch,2,6,80,4】
+        #     last_level = results[1]
+        #     # last_score： 预测概率【batch，2,6】
+        #     last_scores = results[2]
+        #     decoder_outputs[f'level_{k}_interactions'] = last_level
+        #     decoder_outputs[f'level_{k}_scores'] = last_scores
+
+        y_hat = last_level[:,:,:,:2]
+        pi = last_scores
+
+
+
+        #todo: remove other agent loss
+        # x_others = previous_encoder[:, 1:N] #[batch,35,128]
+        # y_hat_others = self.dense_predictor(x_others).view(B, -1, 60, 2)
 
         return {
             "y_hat": y_hat,
             "pi": pi,
-            "y_hat_others": y_hat_others,
+            # "y_hat_others": y_hat_others,
         }

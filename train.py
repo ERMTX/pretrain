@@ -1,5 +1,4 @@
 import os
-
 import hydra
 import pytorch_lightning as pl
 from hydra.core.hydra_config import HydraConfig
@@ -56,11 +55,27 @@ def main(conf):
         limit_val_batches=conf.limit_val_batches,
         sync_batchnorm=conf.sync_bn,
     )
-
+    print('conf_checkpoint',conf.checkpoint)
     model = instantiate(conf.model.target)
+    print(model)
     datamodule = instantiate(conf.datamodule)
     trainer.fit(model, datamodule, ckpt_path=conf.checkpoint)
 
 
 if __name__ == "__main__":
     main()
+
+
+# data_root=/home/fu/argoverse2_forcast_mae
+# model=model_forecast
+# gpus=1
+# batch_size=32
+# monitor=val_minFDE6
+# pretrained_weights="/home/fu/argoverse2_forcast_mae/pretrain_ckpt/last.ckpt"
+
+#
+# data_root=/home/fu/argoverse2_forcast_mae
+# model=model_mae
+# gpus=1
+# batch_size=32
+# monitor=val_minFDE6

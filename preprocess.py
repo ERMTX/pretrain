@@ -29,7 +29,7 @@ def preprocess(args):
     batch = args.batch
     data_root = Path(args.data_root)
 
-    for mode in ["train", "val", "test"]:
+    for mode in ["val", "test"]:
         if args.multiagent:
             save_dir = data_root / "multiagent-baseline" / mode
             extractor = Av2ExtractorMultiAgent(save_path=save_dir, mode=mode)
