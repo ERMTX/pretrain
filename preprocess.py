@@ -29,7 +29,7 @@ def preprocess(args):
     batch = args.batch
     data_root = Path(args.data_root)
 
-    for mode in ["val", "test"]:
+    for mode in ['train']:
         if args.multiagent:
             save_dir = data_root / "multiagent-baseline" / mode
             extractor = Av2ExtractorMultiAgent(save_path=save_dir, mode=mode)
@@ -53,13 +53,14 @@ def preprocess(args):
         else:
             for file in tqdm(scenario_files):
                 extractor.save(file)
+                pass
 
 
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--data_root", "-d", type=str, required=True)
     parser.add_argument("--batch", "-b", type=int, default=50)
-    parser.add_argument("--parallel", "-p", action="store_true")
+    parser.add_argument("--parallel", "-p", action="store_true",default=False)
     parser.add_argument("--multiagent", "-m", action="store_true")
 
     args = parser.parse_args()

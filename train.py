@@ -26,7 +26,8 @@ def main(conf):
             resume=conf.checkpoint is not None,
         )
     else:
-        logger = TensorBoardLogger(save_dir=output_dir, name="logs")
+        task_name = conf.task_name
+        logger = TensorBoardLogger(save_dir=output_dir, name=f"{task_name}")
 
     callbacks = [
         ModelCheckpoint(
@@ -58,6 +59,10 @@ def main(conf):
     print('conf_checkpoint',conf.checkpoint)
     model = instantiate(conf.model.target)
     print(model)
+    # print('pretrained_checkpoint', conf.checkpoint)
+
+    print(conf)
+    logger.log_graph(model)
     datamodule = instantiate(conf.datamodule)
     trainer.fit(model, datamodule, ckpt_path=conf.checkpoint)
 

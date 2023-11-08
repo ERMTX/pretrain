@@ -33,11 +33,11 @@ class Av2Extractor:
     def save(self, file: Path):
         assert self.save_path is not None
 
-        try:
-            data = self.get_data(file)
-        except Exception:
-            print(traceback.format_exc())
-            print("found error while extracting data from {}".format(file))
+        # try:
+        data = self.get_data(file)
+        # except Exception:
+        #     print(traceback.format_exc())
+        #     print("found error while extracting data from {}".format(file))
         save_file = self.save_path / (file.stem + ".pt")
         torch.save(data, save_file)
 
@@ -48,7 +48,7 @@ class Av2Extractor:
         df, am, scenario_id = load_av2_df(raw_path)
         city = df.city.values[0]
         agent_id = df["focal_track_id"].values[0]
-
+        # 主车信息：id,当前全局坐标、朝向，
         local_df = df[df["track_id"] == agent_id].iloc
         origin = torch.tensor(
             [local_df[49]["position_x"], local_df[49]["position_y"]], dtype=torch.float
@@ -60,7 +60,7 @@ class Av2Extractor:
                 [torch.sin(theta), torch.cos(theta)],
             ],
         )
-
+        #周围车辆信息，并过滤掉范围之外的actor
         timestamps = list(np.sort(df["timestep"].unique()))
         cur_df = df[df["timestep"] == timestamps[49]]
         actor_ids = list(cur_df["track_id"].unique())
@@ -95,7 +95,7 @@ class Av2Extractor:
             padding_mask[node_idx, node_steps] = False
             if padding_mask[node_idx, 49] or object_type in self.ignore_type:
                 padding_mask[node_idx, 50:] = True
-
+            # 读取全局坐标下轨迹坐标xy
             pos_xy = torch.from_numpy(
                 np.stack(
                     [actor_df["position_x"].values, actor_df["position_y"].values],
@@ -107,13 +107,24 @@ class Av2Extractor:
                 actor_df[["velocity_x", "velocity_y"]].values
             ).float()
             velocity_norm = torch.norm(velocity, dim=1)
-
+            # 全局坐标轨迹转为主车坐标系
+            # x[node_idx, node_steps, :2] = pos_xy
             x[node_idx, node_steps, :2] = torch.matmul(pos_xy - origin, rotate_mat)
             x_heading[node_idx, node_steps] = (heading - theta + np.pi) % (
                 2 * np.pi
             ) - np.pi
             x_velocity[node_idx, node_steps] = velocity_norm
 
+        # 绘制轨迹
+        # input = x
+        # print(input.shape)
+        # input = input.cpu().detach().numpy()
+        # import matplotlib.pyplot as plt
+        # fig, ax = plt.subplots(2, 2)
+        # for i in range(input.shape[1]):
+        #     ax[0, 0].scatter(input[i, :, 0], input[i, :, 1], s=1)
+        # plt.show()
+        x_before_valid = x.clone()
         (
             lane_positions,
             is_intersections,
@@ -135,23 +146,24 @@ class Av2Extractor:
             x_attr = x_attr[valid_actor_mask]
             padding_mask = padding_mask[valid_actor_mask]
             num_nodes = x.shape[0]
-
+        # x_after_remove = x.clone()
         x_ctrs = x[:, 49, :2].clone()
         x_positions = x[:, :50, :2].clone()
         x_velocity_diff = x_velocity[:, :50].clone()
-
+        # 后60帧转化为以所属agent当前位置为原点坐标系的未来轨迹
         x[:, 50:] = torch.where(
             (padding_mask[:, 49].unsqueeze(-1) | padding_mask[:, 50:]).unsqueeze(-1),
             torch.zeros(num_nodes, 60, 2),
             x[:, 50:] - x[:, 49].unsqueeze(-2),
         )
+        # 前50帧转化为相对前一帧的位移为特征的历史轨迹diff，而历史轨迹坐标为x_positions
         x[:, 1:50] = torch.where(
             (padding_mask[:, :49] | padding_mask[:, 1:50]).unsqueeze(-1),
             torch.zeros(num_nodes, 49, 2),
             x[:, 1:50] - x[:, :49],
         )
         x[:, 0] = torch.zeros(num_nodes, 2)
-
+        # x_after_trans = x.clone()
         x_velocity_diff[:, 1:50] = torch.where(
             (padding_mask[:, :49] | padding_mask[:, 1:50]),
             torch.zeros(num_nodes, 49),
@@ -160,6 +172,48 @@ class Av2Extractor:
         x_velocity_diff[:, 0] = torch.zeros(num_nodes)
 
         y = None if self.mode == "test" else x[:, 50:]
+        # 预处理中得到
+        # print(x.shape)
+        # x_ = x_before_valid.cpu().detach().numpy()
+        # y_ = x_after_remove.cpu().detach().numpy()
+        # z_ = x_after_trans.cpu().detach().numpy()
+        # # pos_xy.cpu().detach().numpy
+        # # positions = pos_xy.cpu().detach().numpy()
+        # import matplotlib.pyplot as plt
+        #
+        # fig, ax = plt.subplots(2, 2)
+        # for i in range(x_.shape[0]):
+        #     ax[0, 0].scatter(x_[i, :, 0], x_[i, :, 1], s=1)
+        # for i in range(y_.shape[0]):
+        #     ax[0, 1].scatter(y_[i, :, 0], y_[i, :, 1], s=1)
+        # for i in range(z_.shape[0]):
+        #     ax[1, 0].scatter(z_[i, :, 0], z_[i, :, 1], s=1)
+        # # ax[1, 1].scatter(positions[:, 0], positions[:, 1], s=1)
+        # plt.show()
+
+        # print(x.shape)
+        # x_ = x_before_valid.cpu().detach().numpy()
+        # y_ = x_after_remove.cpu().detach().numpy()
+        # z_ = x_after_trans.cpu().detach().numpy()
+        # p_ = x_positions.cpu().detach().numpy()
+        # # pos_xy.cpu().detach().numpy
+        # # positions = pos_xy.cpu().detach().numpy()
+        # import matplotlib.pyplot as plt
+        #
+        # fig, ax = plt.subplots(2, 2)
+        # for i in range(x_.shape[0]):
+        #     ax[0, 0].scatter(x_[i, :, 0], x_[i, :, 1], s=1)
+        # for i in range(y_.shape[0]):
+        #     ax[0, 1].scatter(y_[i, :, 0], y_[i, :, 1], s=1)
+        # for i in range(1):
+        #     ax[1, 0].scatter(z_[i, 50:, 0], z_[i, 50:, 1], s=1)
+        #     ax[1, 0].scatter(z_[i, :50, 0], z_[i, :50, 1], s=1)
+        # for i in range(1):
+        #     ax[1, 1].scatter(p_[i, 50:, 0], p_[i, 50:, 1], s=1)
+        #     ax[1, 1].scatter(p_[i, :50, 0], p_[i, :50, 1], s=1)
+        # # ax[1, 1].scatter(positions[:, 0], positions[:, 1], s=1)
+        # plt.show()
+
 
         return {
             "x": x[:, :50],

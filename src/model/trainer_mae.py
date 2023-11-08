@@ -52,6 +52,7 @@ class Trainer(pl.LightningModule):
         )
 
     def forward(self, data):
+        # print(self.net)
         return self.net(data)
 
     def training_step(self, data, batch_idx):

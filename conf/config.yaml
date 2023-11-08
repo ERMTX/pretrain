@@ -9,7 +9,7 @@ save_top_k: 10
 
 data_root:
 checkpoint:
-pretrained_weights: /home/fu/argoverse2_forcast_mae/pretrain_ckpt
+pretrained_weights:
 output: ${model.name}-${model.phase}
 
 # trainer
@@ -19,6 +19,7 @@ sync_bn: true
 batch_size: 32
 epochs: 60
 warmup_epochs: 10
+task_name: mae
 
 # optimizer
 lr: 0.001

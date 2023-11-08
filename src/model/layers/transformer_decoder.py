@@ -101,8 +101,8 @@ class InteractionDecoder(nn.Module):
 class FutureEncoder(nn.Module):
     def __init__(self):
         super(FutureEncoder, self).__init__()
-        self.mlp = nn.Sequential(nn.Linear(8, 64), nn.ReLU(), nn.Linear(64, 256))
-        self.type_emb = nn.Embedding(4, 256, padding_idx=0)
+        self.mlp = nn.Sequential(nn.Linear(5, 64), nn.ReLU(), nn.Linear(64, 128))
+        self.type_emb = nn.Embedding(5, 128, padding_idx=0)
 
     def state_process(self, trajs, current_states):
         M = trajs.shape[2]
@@ -112,15 +112,15 @@ class FutureEncoder(nn.Module):
         v = dxy / 0.1
         theta = torch.atan2(dxy[..., 1], dxy[..., 0].clamp(min=1e-3)).unsqueeze(-1)
         T = trajs.shape[3]
-        size = current_states[:, :, :, None, 5:8].expand(-1, -1, -1, T, -1)
-        trajs = torch.cat([trajs, theta, v, size], dim=-1) # (x, y, heading, vx, vy, w, l, h)
+        # size = current_states[:, :, :, None, 5:8].expand(-1, -1, -1, T, -1)
+        trajs = torch.cat([trajs, theta, v], dim=-1) # (x, y, heading, vx, vy, w, l, h)
 
         return trajs
 
     def forward(self, trajs, current_states):
         trajs = self.state_process(trajs, current_states)
         trajs = self.mlp(trajs.detach())
-        type = self.type_emb(current_states[:, :, None, 8].int())
+        type = self.type_emb(current_states[:, :, None, 2].int())
         output = torch.max(trajs, dim=-2).values
         output = output + type
 
@@ -129,7 +129,7 @@ class FutureEncoder(nn.Module):
 class SelfTransformer(nn.Module):
     def __init__(self):
         super(SelfTransformer, self).__init__()
-        heads, dim, dropout = 8, 256, 0.1
+        heads, dim, dropout = 8, 128, 0.1
         self.self_attention = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
         self.norm_1 = nn.LayerNorm(dim)
         self.norm_2 = nn.LayerNorm(dim)
