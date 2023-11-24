@@ -36,9 +36,9 @@ class GMMPredictor(nn.Module):
     def __init__(self, future_len):
         super(GMMPredictor, self).__init__()
         self._future_len = future_len
-        self.gaussian = nn.Sequential(nn.Linear(128, 256), nn.ELU(), nn.Dropout(0.1),
+        self.gaussian = nn.Sequential(nn.Linear(128, 256), nn.ReLU(), nn.Dropout(0.1),
                                       nn.Linear(256, self._future_len * 4))
-        self.score = nn.Sequential(nn.Linear(128, 64), nn.ELU(), nn.Dropout(0.1), nn.Linear(64, 1))
+        self.score = nn.Sequential(nn.Linear(128, 64), nn.ReLU(), nn.Dropout(0.1), nn.Linear(64, 1))
 
     def forward(self, input):
         B, M, _ = input.shape
@@ -55,7 +55,7 @@ class CrossTransformer(nn.Module):
         self.cross_attention = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
         self.norm_1 = nn.LayerNorm(dim)
         self.norm_2 = nn.LayerNorm(dim)
-        self.ffn = nn.Sequential(nn.Linear(dim, dim*4), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim*4, dim), nn.Dropout(dropout))
+        self.ffn = nn.Sequential(nn.Linear(dim, dim*4), nn.ReLU(), nn.Dropout(dropout), nn.Linear(dim*4, dim), nn.Dropout(dropout))
 
     def forward(self, query, key, value, mask=None):
         attention_output, _ = self.cross_attention(query, key, value, key_padding_mask=mask)
@@ -133,7 +133,7 @@ class SelfTransformer(nn.Module):
         self.self_attention = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
         self.norm_1 = nn.LayerNorm(dim)
         self.norm_2 = nn.LayerNorm(dim)
-        self.ffn = nn.Sequential(nn.Linear(dim, dim*4), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim*4, dim), nn.Dropout(dropout))
+        self.ffn = nn.Sequential(nn.Linear(dim, dim*4), nn.ReLU(), nn.Dropout(dropout), nn.Linear(dim*4, dim), nn.Dropout(dropout))
 
     def forward(self, inputs, mask=None):
         attention_output, _ = self.self_attention(inputs, inputs, inputs, key_padding_mask=mask)

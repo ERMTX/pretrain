@@ -16,7 +16,7 @@ def main(conf):
     model_path = conf.model.target._target_
     module = import_module(model_path[: model_path.rfind(".")])
     Model: pl.LightningModule = getattr(module, model_path[model_path.rfind(".") + 1 :])
-    model = Model.load_from_checkpoint(checkpoint)
+    model = Model.load_from_checkpoint(checkpoint,strict=False)
 
     trainer = pl.Trainer(
         logger=False,

@@ -110,30 +110,30 @@ class Trainer(pl.LightningModule):
 
 
     #1)cal target_loss & sur_dense_predict_loss
-    def cal_loss(self, out, data):
-        y_hat, pi, y_hat_others = out["y_hat"], out["pi"], out["y_hat_others"]
-        y, y_others = data["y"][:, 0], data["y"][:, :]
-
-        l2_norm = torch.norm(y_hat[..., :2] - y.unsqueeze(1), dim=-1).sum(dim=-1)
-        best_mode = torch.argmin(l2_norm, dim=-1)
-        y_hat_best = y_hat[torch.arange(y_hat.shape[0]), best_mode]
-
-        agent_reg_loss = F.smooth_l1_loss(y_hat_best[..., :2], y)
-        agent_cls_loss = F.cross_entropy(pi, best_mode.detach())
-
-        others_reg_mask = ~data["x_padding_mask"][:, :, 50:]
-        others_reg_loss = F.smooth_l1_loss(
-            y_hat_others[others_reg_mask], y_others[others_reg_mask]
-        )
-
-        loss = agent_reg_loss + agent_cls_loss + others_reg_loss
-
-        return {
-            "loss": loss,
-            "reg_loss": agent_reg_loss.item(),
-            "cls_loss": agent_cls_loss.item(),
-            "others_reg_loss": others_reg_loss.item(),
-        }
+    # def cal_loss(self, out, data):
+    #     y_hat, pi, y_hat_others = out["y_hat"], out["pi"], out["y_hat_others"]
+    #     y, y_others = data["y"][:, 0], data["y"][:, :]
+    #
+    #     l2_norm = torch.norm(y_hat[..., :2] - y.unsqueeze(1), dim=-1).sum(dim=-1)
+    #     best_mode = torch.argmin(l2_norm, dim=-1)
+    #     y_hat_best = y_hat[torch.arange(y_hat.shape[0]), best_mode]
+    #
+    #     agent_reg_loss = F.smooth_l1_loss(y_hat_best[..., :2], y)
+    #     agent_cls_loss = F.cross_entropy(pi, best_mode.detach())
+    #
+    #     others_reg_mask = ~data["x_padding_mask"][:, :, 50:]
+    #     others_reg_loss = F.smooth_l1_loss(
+    #         y_hat_others[others_reg_mask], y_others[others_reg_mask]
+    #     )
+    #
+    #     loss = agent_reg_loss + agent_cls_loss + others_reg_loss
+    #
+    #     return {
+    #         "loss": loss,
+    #         "reg_loss": agent_reg_loss.item(),
+    #         "cls_loss": agent_cls_loss.item(),
+    #         "others_reg_loss": others_reg_loss.item(),
+    #     }
 
     # 2) cal target_loss
     # def cal_loss(self, out, data):
@@ -194,6 +194,34 @@ class Trainer(pl.LightningModule):
     #                    })
     #
     #     return loss_result
+
+    # AutomaticWeightedLoss
+    def cal_loss(self, out, data):
+        from AutomaticWeightedLoss.AutomaticWeightedLoss import AutomaticWeightedLoss
+        multi_task_loss = AutomaticWeightedLoss(3)
+        y_hat, pi, y_hat_others = out["y_hat"], out["pi"], out["y_hat_others"]
+        y, y_others = data["y"][:, 0], data["y"][:, :]
+
+        l2_norm = torch.norm(y_hat[..., :2] - y.unsqueeze(1), dim=-1).sum(dim=-1)
+        best_mode = torch.argmin(l2_norm, dim=-1)
+        y_hat_best = y_hat[torch.arange(y_hat.shape[0]), best_mode]
+
+        agent_reg_loss = F.smooth_l1_loss(y_hat_best[..., :2], y)
+        agent_cls_loss = F.cross_entropy(pi, best_mode.detach())
+
+        others_reg_mask = ~data["x_padding_mask"][:, :, 50:]
+        others_reg_loss = F.smooth_l1_loss(
+            y_hat_others[others_reg_mask], y_others[others_reg_mask]
+        )
+
+        loss = multi_task_loss(agent_reg_loss,agent_cls_loss,others_reg_loss)
+
+        return {
+            "loss": loss,
+            "reg_loss": agent_reg_loss.item(),
+            "cls_loss": agent_cls_loss.item(),
+            "others_reg_loss": others_reg_loss.item(),
+        }
 
     def training_step(self, data, batch_idx):
         # 验证mask作用的demo function
@@ -291,22 +319,23 @@ class Trainer(pl.LightningModule):
             nn.Embedding,
         )
         for module_name, module in self.named_modules():
-            for param_name, param in module.named_parameters():
-                full_param_name = (
-                    "%s.%s" % (module_name, param_name) if module_name else param_name
-                )
-                if "bias" in param_name:
-                    if 'net.interaction_stage.0.future_encoder.mlp.0.bias' in no_decay and 'future_encoder' in full_param_name:
-                        pass
-                    else:
+            if 'decoder' in module_name:
+                for param_name, param in module.named_parameters():
+                    full_param_name = (
+                        "%s.%s" % (module_name, param_name) if module_name else param_name
+                    )
+                    if "bias" in param_name:
+                        if 'net.interaction_stage.0.future_encoder.mlp.0.bias' in no_decay and 'future_encoder' in full_param_name:
+                            pass
+                        else:
+                            no_decay.add(full_param_name)
+                    elif "weight" in param_name:
+                        if isinstance(module, whitelist_weight_modules):
+                            decay.add(full_param_name)
+                        elif isinstance(module, blacklist_weight_modules):
+                            no_decay.add(full_param_name)
+                    elif not ("weight" in param_name or "bias" in param_name):
                         no_decay.add(full_param_name)
-                elif "weight" in param_name:
-                    if isinstance(module, whitelist_weight_modules):
-                        decay.add(full_param_name)
-                    elif isinstance(module, blacklist_weight_modules):
-                        no_decay.add(full_param_name)
-                elif not ("weight" in param_name or "bias" in param_name):
-                    no_decay.add(full_param_name)
         param_dict = {
             param_name: param for param_name, param in self.named_parameters()
         }

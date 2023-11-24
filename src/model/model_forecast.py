@@ -50,15 +50,24 @@ class ModelForecast(nn.Module):
         self.actor_type_embed = nn.Parameter(torch.Tensor(4, embed_dim))
         self.lane_type_embed = nn.Parameter(torch.Tensor(1, 1, embed_dim))
         self.mode = 6
+        self.decoder_pred_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.decoder = MultimodalDecoder(embed_dim, future_steps)
-        self.dense_predictor = nn.Sequential(
+        self.decoder_dense_predictor = nn.Sequential(
             nn.Linear(embed_dim, 256), nn.ReLU(), nn.Linear(256, future_steps * 2)
         )
 
-        self.first_layer_decoder = InitialDecoder(6, 0, future_steps)
-        self.decoder_layer_num = 3
-        future_encoder = FutureEncoder()
-        self.interaction_stage = nn.ModuleList([InteractionDecoder(future_encoder, future_steps) for _ in range(self.decoder_layer_num)])
+        # self.hist_lstm_embed = nn.LSTM(4, 128, 2, batch_first=True)
+        # self.hist_trans_embed = nn.TransformerEncoderLayer(d_model=128, nhead=4, dim_feedforward=128)
+        # self.fut_lstm_embed = nn.LSTM(3, 128, 2, batch_first=True)
+        # self.fut_trans_embed = nn.TransformerEncoderLayer(d_model=128, nhead=4, dim_feedforward=128)
+        # self.lane_lstm_embed = nn.LSTM(3,128,2,batch_first=True)
+        # self.lane_trans_embed = nn.TransformerEncoderLayer(d_model=128, nhead=4, dim_feedforward=128)
+
+
+        # self.first_layer_decoder = InitialDecoder(6, 0, future_steps)
+        # self.decoder_layer_num = 3
+        # future_encoder = FutureEncoder()
+        # self.interaction_stage = nn.ModuleList([InteractionDecoder(future_encoder, future_steps) for _ in range(self.decoder_layer_num)])
         # self.decoder_embed = nn.Linear(embed_dim, embed_dim, bias=True)
         # self.decoder_pos_embed = nn.Sequential(
         #     nn.Linear(4, embed_dim),
@@ -90,11 +99,12 @@ class ModelForecast(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def load_from_checkpoint(self, ckpt_path):
+        # ckpt_path = '/media/fu/SSD/forecast-mae/epoch59.ckpt'
         ckpt = torch.load(ckpt_path, map_location="cpu")["state_dict"]
         state_dict = {
             k[len("net.") :]: v for k, v in ckpt.items() if k.startswith("net.")
         }
-        print('load_ckpy_modules: ',state_dict.keys())
+        print('load_ckpy_modules: ', state_dict.keys())
         return self.load_state_dict(state_dict=state_dict, strict=False)
 
     def forward(self, data):
@@ -116,6 +126,9 @@ class ModelForecast(nn.Module):
         actor_feat = self.hist_embed(
             hist_feat[~hist_feat_key_padding].permute(0, 2, 1).contiguous()
         )
+
+        # actor_feat, _ = self.hist_lstm_embed(hist_feat[~hist_feat_key_padding])
+        # actor_feat = self.hist_trans_embed(actor_feat)[:,-1,:]
         actor_feat_tmp = torch.zeros(
             B * N, actor_feat.shape[-1], device=actor_feat.device
         )
@@ -129,6 +142,8 @@ class ModelForecast(nn.Module):
         )
         B, M, L, D = lane_normalized.shape
         lane_feat = self.lane_embed(lane_normalized.view(-1, L, D).contiguous())
+        # lane_feat, _ = self.lane_lstm_embed(lane_normalized.view(B*M,L,D))
+        # lane_feat = self.lane_trans_embed(lane_feat)[:,-1,:]
         lane_feat = lane_feat.view(B, M, -1)
 
 
@@ -190,6 +205,7 @@ class ModelForecast(nn.Module):
         for blk in self.blocks:
             x_encoder = blk(x_encoder, key_padding_mask=key_padding_mask)
         x_encoder = self.norm(x_encoder)
+        # x_encoder = self.decoder_pred_proj(x_encoder)
 
         #与pretrain一致，在decoder之前加上线性映射与pos_embed
         # x_encoder = self.decoder_embed(x_encoder)
@@ -210,18 +226,9 @@ class ModelForecast(nn.Module):
         # map_pos = pos_feat[:,N:,:]
 
 
-
-
-
-
-
-
-
-
-
         #sur mlp decoder
         x_others = x_encoder[:, :N] #[batch,35,128]
-        y_hat_others = self.dense_predictor(x_others).view(B, -1, 60, 2)
+        y_hat_others = self.decoder_dense_predictor(x_others).view(B, -1, 60, 2)
 
         # dense predict 进行agent-centric的预测
         # y_hat_others += data['x_positions'][:, :, -1:, :]

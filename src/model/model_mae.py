@@ -37,6 +37,14 @@ class ModelMAE(nn.Module):
         self.future_embed = AgentEmbeddingLayer(3, 32, drop_path_rate=drop_path)
         self.lane_embed = LaneEmbeddingLayer(3, embed_dim)
 
+        # self.hist_lstm_embed = nn.LSTM(4, 128, 2, batch_first=True)
+        # self.hist_trans_embed = nn.TransformerEncoderLayer(d_model=128, nhead=4, dim_feedforward=128)
+        # self.fut_lstm_embed = nn.LSTM(3, 128, 2, batch_first=True)
+        # self.fut_trans_embed = nn.TransformerEncoderLayer(d_model=128, nhead=4, dim_feedforward=128)
+        #
+        # self.lane_lstm_embed = nn.LSTM(3,128,2,batch_first=True)
+        # self.lane_trans_embed = nn.TransformerEncoderLayer(d_model=128, nhead=4, dim_feedforward=128)
+
         self.pos_embed = nn.Sequential(
             nn.Linear(4, embed_dim),
             nn.GELU(),
@@ -296,24 +304,60 @@ class ModelMAE(nn.Module):
             ],
             dim=-1,
         )
+        # random_point_wise_mask
+        hist_feat, gt_hist_feat, hist_pointwise_mask = get_random_masked_pointwise(hist_feat,0.5)
+        #相当于最后一维的feature
+        hist_feature_mask = hist_pointwise_mask * (~hist_padding_mask[...,None])
+        #point_wise_mask中需要被预测的point
+        hist_pointwise_pred_mask = (~hist_pointwise_mask) * (~hist_padding_mask[..., None])
+        #vis
+        # import matplotlib.pyplot as plt
+        # before = gt_hist_feat[0, :, :, -1].cpu().detach().numpy()
+        # after = hist_feat[0, :, :, -1].cpu().detach().numpy()
+        # mask1 = feature_mask[0, :, :, 0].cpu().detach().numpy()
+        # mask2 = pointwise_pred_mask[0, :, :, 0].cpu().detach().numpy()
+        # plt.matshow(before)
+        # plt.matshow(after)
+        # plt.matshow(mask1)
+        # plt.matshow(mask2)
+        # plt.colorbar()
+        # plt.show()
         B, N, L, D = hist_feat.shape
         # [batch,36,50,4]
         hist_feat = hist_feat.view(B * N, L, D)
         hist_feat = self.hist_embed(hist_feat.permute(0, 2, 1).contiguous())
+        # hist_feat, _ = self.hist_lstm_embed(hist_feat)
+        # hist_feat = self.hist_trans_embed(hist_feat)[:,-1,:]
         hist_feat = hist_feat.view(B, N, hist_feat.shape[-1])  # [batch,36,128]
 
         future_padding_mask = data["x_padding_mask"][:, :, 50:]
         future_feat = torch.cat([data["y"], ~future_padding_mask[..., None]], dim=-1) #[batch, 36, 128]
+        # random_point_wise_mask
+        future_feat, gt_fut_feat, fut_pointwise_mask = get_random_masked_pointwise(future_feat, 0.5)
+        # 相当于最后一维的feature
+        fut_feature_mask = fut_pointwise_mask * (~future_padding_mask[..., None])
+        # point_wise_mask中需要被预测的point
+        fut_pointwise_pred_mask = (~fut_pointwise_mask) * (~future_padding_mask[..., None])
         B, N, L, D = future_feat.shape
         future_feat = future_feat.view(B * N, L, D)
         future_feat = self.future_embed(future_feat.permute(0, 2, 1).contiguous())
+        # future_feat, _ = self.fut_lstm_embed(future_feat)
+        # future_feat = self.fut_trans_embed(future_feat)[:,-1,:]
         future_feat = future_feat.view(B, N, future_feat.shape[-1])
 
         lane_padding_mask = data["lane_padding_mask"]
         lane_normalized = data["lane_positions"] - data["lane_centers"].unsqueeze(-2)
         lane_feat = torch.cat([lane_normalized, ~lane_padding_mask[..., None]], dim=-1)
+        # random_point_wise_mask
+        lane_feat, gt_lane_feat, lane_pointwise_mask = get_random_masked_pointwise(lane_feat, 0.5)
+        # 相当于最后一维的feature
+        lane_feature_mask = lane_pointwise_mask  * (~lane_padding_mask[..., None])
+        # point_wise_mask中需要被预测的point
+        lane_pointwise_pred_mask = (~lane_pointwise_mask ) * (~lane_padding_mask[..., None])
         B, M, L, D = lane_feat.shape  # [batch,200,20,3] #todo:200stand for what? lanes num
         lane_feat = self.lane_embed(lane_feat.view(-1, L, D).contiguous())
+        # lane_feat, _ = self.lane_lstm_embed(lane_feat.view(B*M,L,D))
+        # lane_feat = self.lane_trans_embed(lane_feat)[:,-1,:]
         lane_feat = lane_feat.view(B, M, -1)
 
         (
@@ -435,6 +479,9 @@ class ModelMAE(nn.Module):
         lane_pred = self.lane_pred(lane_token).view(B, M, 20, 2)
         lane_reg_mask = ~lane_padding_mask
         lane_reg_mask[~lane_pred_mask] = False
+        #pred point_wise_mask point
+        for i, idx in enumerate(lane_ids_keep_list):
+            lane_reg_mask[i,idx] = lane_pointwise_pred_mask[i,idx,:,0]
         lane_pred_loss = F.mse_loss(
             lane_pred[lane_reg_mask], lane_normalized[lane_reg_mask]
         )
@@ -444,7 +491,22 @@ class ModelMAE(nn.Module):
         x = (data["x_positions"] - data["x_centers"].unsqueeze(-2)).view(-1, 50, 2)
         x_reg_mask = ~data["x_padding_mask"][:, :, :50]
         x_reg_mask[~hist_pred_mask] = False
+        # before_mask = x_reg_mask.clone()
+        for i, idx in enumerate(hist_keep_ids_list):
+            x_reg_mask[i,idx] = hist_pointwise_pred_mask[i,idx,:,0]
+        #vis
+        # import matplotlib.pyplot as plt
+        # before = before_mask[0, :, :].cpu().detach().numpy()
+        # after = x_reg_mask[0, :, :].cpu().detach().numpy()
+        # point = hist_pointwise_pred_mask[0, :, :, 0].cpu().detach().numpy()
+        # # plt.matshow(before)
+        # plt.matshow(point)
+        # # plt.matshow(mask1)
+        # # plt.matshow(mask2)
+        # plt.colorbar()
+        # plt.show()
         x_reg_mask = x_reg_mask.view(-1, 50)
+        # print('his_pred_len:',x_hat[x_reg_mask].shape)
         hist_loss = F.l1_loss(x_hat[x_reg_mask], x[x_reg_mask])
 
         # future pred loss
@@ -452,6 +514,8 @@ class ModelMAE(nn.Module):
         y = data["y"].view(-1, 60, 2)
         reg_mask = ~data["x_padding_mask"][:, :, 50:]
         reg_mask[~future_pred_mask] = False
+        for i, idx in enumerate(fut_keep_ids_list):
+            reg_mask[i,idx] = fut_pointwise_pred_mask[i,idx,:,0]
         reg_mask = reg_mask.view(-1, 60)
         future_loss = F.l1_loss(y_hat[reg_mask], y[reg_mask])
 
@@ -461,9 +525,119 @@ class ModelMAE(nn.Module):
             + self.loss_weight[2] * lane_pred_loss
         )
 
+        gt_his = (x.view(B, N, 50, 2) + data["x_centers"].unsqueeze(-2)).cpu().detach().numpy()
+        gt_fut = (y.view(B, N, 60, 2)+ data["x_centers"].unsqueeze(-2)).cpu().detach().numpy()
+        gt_lane = (lane_normalized + data["lane_centers"].unsqueeze(-2)).cpu().detach().numpy()
+        mask_his = x_reg_mask.view(B,N,50)
+        mask_fut = reg_mask.view(B,N,60)
+        mask_lane = lane_reg_mask
+
+        pred_his = (x_hat.view(B, N, 50, 2) + data["x_centers"].unsqueeze(-2))[0,mask_his[0,...]].cpu().detach().numpy()
+        pred_fut = (y_hat.view(B, N, 60, 2) + data["x_centers"].unsqueeze(-2))[0,mask_fut[0,...]].cpu().detach().numpy()
+        pred_lane = (lane_pred + data["lane_centers"].unsqueeze(-2))[0,mask_lane[0,...]].cpu().detach().numpy()
+
+        masked_his = (x.view(B, N, 50, 2) + data["x_centers"].unsqueeze(-2))[0,~mask_his[0,...]].cpu().detach().numpy()
+        masked_fut = (y.view(B, N, 60, 2) + data["x_centers"].unsqueeze(-2))[0,~mask_fut[0,...]].cpu().detach().numpy()
+        masked_lane = (lane_normalized + data["lane_centers"].unsqueeze(-2))[0,~mask_lane[0,...]].cpu().detach().numpy()
+
+
+        # import matplotlib.pyplot as plt
+        # plt.scatter(gt_his[0,:,:,0],gt_his[0,:,:,1],c='orange')
+        # plt.scatter(gt_fut[0, :, :, 0], gt_fut[0, :, :, 1],c='blue')
+        # plt.scatter(gt_lane[0,:,:,0],gt_lane[0,:,:,1],c='gray')
+        # plt.scatter(pred_his[:, 0], pred_his[:, 1],c='green')
+        # plt.scatter(pred_fut[:, 0], pred_fut[:, 1],c='green')
+        # plt.scatter(pred_lane[:, 0], pred_lane[:, 1],c='green')
+        # plt.scatter(masked_his[:, 0], masked_his[:, 1], c='orange')
+        # plt.scatter(masked_fut[:, 0], masked_fut[:, 1], c='blue')
+        # plt.scatter(masked_lane[:, 0], masked_lane[:, 1], c='gray')
+
+
+        # plt.axis('equal')
+        # plt.show()
+
+
+
+        # if viz:
+        #     # target/ego bounding_box&traj
+        #     for i in range(ego.shape[0]):
+        #         rect = plt.Rectangle((ego[i,-1, 0]-ego[i,-1, 5]/2, ego[i,-1, 1]-ego[i,-1, 6]/2), ego[i,-1, 5], ego[i,-1, 6], linewidth=2, color='r', alpha=0.6, zorder=3,
+        #                             transform=mpl.transforms.Affine2D().rotate_around(*(ego[i,-1, 0], ego[i,-1, 1]), ego[i,-1, 2]) + plt.gca().transData)
+        #         plt.gca().add_patch(rect)
+        #
+        #         future = ground_truth[i][ground_truth[i][:, 0] != 0]
+        #         plt.plot(future[:, 0], future[:, 1], 'r', linewidth=1, zorder=3)
+        #     # neighbor bounding_box
+        #     for i in range(neighbors.shape[0]):
+        #         if neighbors[i, -1, 0] != 0:
+        #             rect = plt.Rectangle((neighbors[i, -1, 0]-neighbors[i, -1, 5]/2, neighbors[i, -1, 1]-neighbors[i, -1, 6]/2),
+        #                                   neighbors[i, -1, 5], neighbors[i, -1, 6], linewidth=1.5, color='m', alpha=0.6, zorder=3,
+        #                                   transform=mpl.transforms.Affine2D().rotate_around(*(neighbors[i, -1, 0], neighbors[i, -1, 1]), neighbors[i, -1, 2]) + plt.gca().transData)
+        #             plt.gca().add_patch(rect)
+        #     # lanes
+        #     # map_lanes[2,6,300,17]
+        #     # 对2个agent的lane循环
+        #     for i in range(map_lanes.shape[0]):
+        #         lanes = map_lanes[i]
+        #         crosswalks = map_crosswalks[i]
+        #
+        #         #对6条polyline循环绘图
+        #         for j in range(map_lanes.shape[1]):
+        #             lane = lanes[j]
+        #             if lane[0][0] != 0:
+        #                 centerline = lane[:, 0:2]
+        #                 centerline = centerline[centerline[:, 0] != 0]
+        #                 left = lane[:, 3:5]
+        #                 left = left[left[:, 0] != 0]
+        #                 right = lane[:, 6:8]
+        #                 right = right[right[:, 0] != 0]
+        #                 plt.plot(centerline[:, 0], centerline[:, 1], 'k', linewidth=0.5)  # plot centerline
+        #                 plt.plot(left[:,0], left[:,1],'y', linewidth=0.5)  # plot left boundary
+        #                 plt.plot(right[:, 0], right[:, 1], 'orange', linewidth=0.5)  # plot right boundary
+        #         # crosswalks
+        #         # map_crosswalks[2,4,100,3]
+        #         # 对最近4条crosswalks循环绘图
+        #         for k in range(map_crosswalks.shape[1]):
+        #             crosswalk = crosswalks[k]
+        #             if crosswalk[0][0] != 0:
+        #                 crosswalk = crosswalk[crosswalk[:, 0] != 0]
+        #                 plt.plot(crosswalk[:, 0], crosswalk[:, 1], 'b', linewidth=1) # plot crosswalk
+        #     # todo：不知道在画什么点
+        #     if self.point_dir != '':
+        #         for i in range(region_dict[32].shape[0]):
+        #             plt.scatter(region_dict[32][i,:,0],region_dict[32][i,:,1],marker='*',s=10)
+        #
+        #     plt.gca().set_aspect('equal')
+        #     plt.tight_layout()
+        #     plt.show()
+        #     print(' ')
+
+
+
+
+
+
         return {
             "loss": loss,
             "hist_loss": hist_loss.item(),
             "future_loss": future_loss.item(),
             "lane_pred_loss": lane_pred_loss.item(),
         }
+
+def get_random_masked_pointwise(gt_agents, mask_percentage):
+    time_dim = 1
+    # ego_in, ego_out, agents_in, agents_out
+    mask = torch.rand((gt_agents[:,:, :,-1].shape)).to(gt_agents.device)
+    mask = (mask > mask_percentage).unsqueeze(-1) # [B, T, M, 1]
+
+    masked_agent = gt_agents * mask
+    # vis
+    # import matplotlib.pyplot as plt
+    # # before = ego_data[0,:,:].cpu().detach().numpy()
+    # # after = ego_masked[0,:,:].cpu().detach().numpy()
+    # before = agents_data[0, :, :, 1].cpu().detach().numpy()
+    # after = agents_masked[0, :, :, 1].cpu().detach().numpy()
+    # # plt.matshow(before)
+    # plt.matshow(after)
+    # plt.show()
+    return masked_agent, gt_agents, mask
