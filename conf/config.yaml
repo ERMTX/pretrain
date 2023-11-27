@@ -19,7 +19,7 @@ sync_bn: true
 batch_size: 32
 epochs: 60
 warmup_epochs: 10
-task_name: mae
+task_name:
 
 # optimizer
 lr: 0.0005
