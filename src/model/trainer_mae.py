@@ -57,6 +57,8 @@ class Trainer(pl.LightningModule):
 
     def training_step(self, data, batch_idx):
         out = self(data)
+        self.log("train/loss", out["loss"],on_step=True)
+        self.log("train/latent_pred_loss", out["latent_pred_loss"],on_step=True)
         return out["loss"]
 
     def validation_step(self, data, batch_idx):

@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
+import numpy as np
 
 from .layers.agent_embedding import AgentEmbeddingLayer
 from .layers.lane_embedding import LaneEmbeddingLayer
@@ -15,7 +16,7 @@ class ModelMAE(nn.Module):
         self,
         embed_dim=128,
         encoder_depth=4,
-        decoder_depth=4,
+        decoder_depth=2,
         num_heads=8,
         mlp_ratio=4.0,
         qkv_bias=False,
@@ -77,14 +78,32 @@ class ModelMAE(nn.Module):
 
 
         # decoder
-        self.decoder_embed = nn.Linear(embed_dim, embed_dim, bias=True)
-        self.decoder_pos_embed = nn.Sequential(
+        self.reg_embed = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.reg_pos_embed = nn.Sequential(
             nn.Linear(4, embed_dim),
             nn.GELU(),
             nn.Linear(embed_dim, embed_dim),
         )
+        # decoder
+        self.decoder_embed = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.decoder_pos_embed = nn.Sequential(
+            nn.Linear(4, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),)
+
         #
         dpr = [x.item() for x in torch.linspace(0, drop_path, decoder_depth)]
+        self.regression_blocks = nn.ModuleList(
+            Block(
+                dim=embed_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                drop_path=dpr[i],
+            )
+            for i in range(decoder_depth)
+        )
+
         self.decoder_blocks = nn.ModuleList(
             Block(
                 dim=embed_dim,
@@ -95,6 +114,8 @@ class ModelMAE(nn.Module):
             )
             for i in range(decoder_depth)
         )
+
+
         self.decoder_norm = nn.LayerNorm(embed_dim)
 
         self.actor_type_embed = nn.Parameter(torch.Tensor(4, embed_dim))
@@ -212,8 +233,11 @@ class ModelMAE(nn.Module):
 
         len_keeps = (fut_num_tokens * (1 - mask_ratio)).int() #mask之后保留下的agent数量,向下取整
         hist_masked_tokens, fut_masked_tokens = [], []
+        hist_bemasked_tokens, fut_bemasked_tokens = [], []
         hist_keep_ids_list, fut_keep_ids_list = [], []
+        hist_masked_ids_list, fut_masked_ids_list = [], []
         hist_key_padding_mask, fut_key_padding_mask = [], []
+        fut_bemasked_key_padding_mask, hist_bemasked_key_padding_mask = [], []
 
         device = hist_tokens.device
         agent_ids = torch.arange(hist_tokens.shape[1], device=device)
@@ -224,9 +248,15 @@ class ModelMAE(nn.Module):
             pred_agent_ids = agent_ids[future_pred_mask] #从每个样本中标记哪些agent有效
             noise = torch.rand(fut_num_token, device=device)
             ids_shuffle = torch.argsort(noise)
-            fut_ids_keep = ids_shuffle[:len_keep]  # 由随机数排序得到随机保留的agent
+            fut_ids_keep = ids_shuffle[:len_keep] # 由随机数排序得到随机保留的agent
+            # fut_ids_bemasked = ids_shuffle[len_keep:] #1）将无效的future——tokens剔除在外
+            fut_ids_bemasked = torch.tensor(
+                np.setdiff1d(np.arange(0, fut_num_token.cpu().detach().numpy()), fut_ids_keep.cpu().detach().numpy()),
+                device=device) #2）将无效的future——tokens包含在内
             fut_ids_keep = pred_agent_ids[fut_ids_keep]  # 未被mask未来的agent id
             fut_keep_ids_list.append(fut_ids_keep)
+            fut_masked_ids_list.append(pred_agent_ids[fut_ids_bemasked])
+
 
             # 随机挑选对历史mask的agent
             hist_keep_mask = torch.zeros_like(agent_ids).bool()
@@ -234,21 +264,38 @@ class ModelMAE(nn.Module):
             hist_keep_mask[fut_ids_keep] = False  # 对已经mask未来的车辆设为false
             hist_ids_keep = agent_ids[hist_keep_mask]
             hist_keep_ids_list.append(hist_ids_keep)
+            hist_masked_ids_list.append(agent_ids[fut_ids_keep])
+            # hist_ids_remove = torch.tensor(
+            #     np.setdiff1d(np.arange(0, agent_ids.shape[0]), hist_ids_keep.cpu().detach().numpy()),
+            #     device=device)
 
             fut_masked_tokens.append(fut_tokens[i, fut_ids_keep])
             hist_masked_tokens.append(hist_tokens[i, hist_ids_keep])
+            fut_bemasked_tokens.append(fut_tokens[i, fut_ids_bemasked])
+            hist_bemasked_tokens.append(hist_tokens[i, fut_ids_keep])
 
             fut_key_padding_mask.append(torch.zeros(len_keep, device=device))
             hist_key_padding_mask.append(torch.zeros(len(hist_ids_keep), device=device))
+            fut_bemasked_key_padding_mask.append(torch.zeros(fut_bemasked_tokens[i].shape[0], device=device))
+            hist_bemasked_key_padding_mask.append(torch.zeros(hist_bemasked_tokens[i].shape[0], device=device))
 
         fut_masked_tokens = pad_sequence(fut_masked_tokens, batch_first=True)
         hist_masked_tokens = pad_sequence(hist_masked_tokens, batch_first=True)
+        fut_bemasked_tokens = pad_sequence(fut_bemasked_tokens, batch_first=True) #将未来所有时间步都无效的future_tokens剔除在外
+        hist_bemasked_tokens = pad_sequence(hist_bemasked_tokens, batch_first=True)
+        fut_bemasked_key_padding_mask = pad_sequence(
+            fut_bemasked_key_padding_mask, batch_first=True, padding_value=True
+        )
+        hist_bemasked_key_padding_mask = pad_sequence(
+            hist_bemasked_key_padding_mask, batch_first=True, padding_value=True
+        )
         fut_key_padding_mask = pad_sequence(
             fut_key_padding_mask, batch_first=True, padding_value=True
         )
         hist_key_padding_mask = pad_sequence(
             hist_key_padding_mask, batch_first=True, padding_value=True
         )
+
 
         return (
             hist_masked_tokens,
@@ -257,33 +304,48 @@ class ModelMAE(nn.Module):
             fut_masked_tokens,
             fut_keep_ids_list,
             fut_key_padding_mask,
+            hist_bemasked_tokens,
+            fut_bemasked_tokens,
+            hist_bemasked_key_padding_mask,
+            fut_bemasked_key_padding_mask,
+            hist_masked_ids_list,
+            fut_masked_ids_list
         )
 
 
     @staticmethod
-    def lane_bert_random_masking(x, future_mask_ratio, key_padding_mask):
+    def lane_random_masking(x, future_mask_ratio, key_padding_mask):
         num_tokens = (~key_padding_mask).sum(1)  # (B, )
         len_keeps = torch.ceil(num_tokens * (1 - future_mask_ratio)).int()
 
-        x_masked, new_key_padding_mask, ids_keep_list = [], [], []
+        x_masked, new_key_padding_mask, ids_keep_list, new_key_padding_masked = [], [], [], []
+        x_bemasked,ids_masked_list = [], []
         for i, (num_token, len_keep) in enumerate(zip(num_tokens, len_keeps)):
             noise = torch.rand(num_token, device=x.device)
             ids_shuffle = torch.argsort(noise)
 
             ids_keep = ids_shuffle[:len_keep]
+            ids_bemasked = ids_shuffle[len_keep:]
             ids_keep_list.append(ids_keep)
+            ids_masked_list.append(ids_bemasked)
             x_masked.append(x[i, ids_keep])
+            x_bemasked.append(x[i, ids_bemasked])
             new_key_padding_mask.append(torch.zeros(len_keep, device=x.device))
+            new_key_padding_masked.append(torch.zeros(ids_bemasked.shape[0], device=x.device))
 
+        x_bemasked = pad_sequence(x_bemasked, batch_first=True)
         x_masked = pad_sequence(x_masked, batch_first=True)
+        new_key_padding_masked = pad_sequence(
+            new_key_padding_masked, batch_first=True, padding_value=True
+        )
         new_key_padding_mask = pad_sequence(
             new_key_padding_mask, batch_first=True, padding_value=True
         )
 
-        return x_masked, new_key_padding_mask, ids_keep_list
+        return x_masked, new_key_padding_mask, ids_keep_list, x_bemasked, new_key_padding_masked,ids_masked_list
 
     @staticmethod
-    def lane_random_masking(x, future_mask_ratio, key_padding_mask):
+    def lane_bert_random_masking(x, future_mask_ratio, key_padding_mask):
         num_tokens = (~key_padding_mask).sum(1)  # (B, )
         len_keeps = torch.ceil(num_tokens * (1 - future_mask_ratio)).int()
 
@@ -405,7 +467,8 @@ class ModelMAE(nn.Module):
         hist_feat += pos_embed[:, :N]
         lane_feat += pos_embed[:, -M:]
         future_feat += pos_embed[:, N: N + N]
-
+        if M==178 and N==28:
+            print('find ')
         (
             hist_masked_tokens,
             hist_keep_ids_list,
@@ -413,6 +476,12 @@ class ModelMAE(nn.Module):
             fut_masked_tokens,
             fut_keep_ids_list,
             fut_key_padding_mask,
+            hist_bemasked_tokens,
+            fut_bemasked_tokens,
+            hist_bemasked_key_padding_mask,
+            fut_bemasked_key_padding_mask,
+            hist_masked_ids_list,
+            fut_masked_ids_list
         ) = self.agent_random_masking(
             hist_feat,
             future_feat,
@@ -420,12 +489,16 @@ class ModelMAE(nn.Module):
             future_padding_mask,
             data["num_actors"],
         )  # mask之后保留下来的历史、未来特征
+
         # [batch,36,128]-->[batch,20,128]，这里的变化比例随valid车辆个数及未来有效valid个数影响。
         lane_mask_ratio = self.lane_mask_ratio
         (
             lane_masked_tokens,
             lane_key_padding_mask,
             lane_ids_keep_list,
+            lane_bemasked_tokens,
+            lane_key_padding_masked,
+            lane_ids_masked_list
         ) = self.lane_random_masking(
             lane_feat, lane_mask_ratio, data["lane_key_padding_mask"]
         )
@@ -443,8 +516,18 @@ class ModelMAE(nn.Module):
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
+        # 2）
+        with torch.no_grad():
+            bemasked_tokens = torch.cat([hist_bemasked_tokens,fut_bemasked_tokens,lane_bemasked_tokens],dim=1)
+            bemasked_key_padding_mask = torch.cat([hist_bemasked_key_padding_mask,fut_bemasked_key_padding_mask,lane_key_padding_masked],dim=1)
+            for blk in self.blocks:
+                bemasked_tokens = blk(bemasked_tokens, key_padding_mask=bemasked_key_padding_mask)
+            # latent_target = self.alignment_encoder(bemasked_tokens)
+            self.alignment_parameter_update()
+
+
         # decoding
-        x_decoder = self.decoder_embed(x)
+        x_decoder = self.reg_embed(x)
         Nh, Nf, Nl = (
             hist_masked_tokens.shape[1],
             fut_masked_tokens.shape[1],
@@ -473,10 +556,11 @@ class ModelMAE(nn.Module):
             decoder_lane_token[i, idx] = lane_tokens[i, : len(idx)]
             lane_pred_mask[i, idx] = False
         #
+
         x_decoder = torch.cat(
             [decoder_hist_token, decoder_fut_token, decoder_lane_token], dim=1
         )
-        x_decoder = x_decoder + self.decoder_pos_embed(pos_feat)
+        x_decoder = x_decoder + self.reg_pos_embed(pos_feat)
         decoder_key_padding_mask = torch.cat(
             [
                 data["x_key_padding_mask"],
@@ -486,21 +570,66 @@ class ModelMAE(nn.Module):
             dim=1,
         )
 
-        for blk in self.decoder_blocks:
+        for blk in self.regression_blocks:
             x_decoder = blk(x_decoder, key_padding_mask=decoder_key_padding_mask)
+        latent_pred = x_decoder
+        latent_hist_pred,latent_fut_pred,latent_lane_pred = [],[],[]
+        for i, idx in enumerate(hist_masked_ids_list):
+            latent_hist_pred.append(latent_pred[:,:N][i,idx])
 
-        x_decoder = self.decoder_norm(x_decoder)
-        hist_token = x_decoder[:, :N].reshape(-1, self.embed_dim)
-        future_token = x_decoder[:, N: 2 * N].reshape(-1, self.embed_dim)
-        lane_token = x_decoder[:, -M:]
+        for i, idx in enumerate(fut_masked_ids_list):
+            latent_fut_pred.append(latent_pred[:,N:2*N][i,idx])
+
+        for i, idx in enumerate(lane_ids_masked_list):
+            latent_lane_pred.append(latent_pred[:,2*N:][i,idx])
+        latent_hist_pred = pad_sequence(latent_hist_pred, batch_first=True)
+        latent_fut_pred = pad_sequence(latent_fut_pred, batch_first=True)
+        latent_lane_pred = pad_sequence(latent_lane_pred, batch_first=True)
+        latent_pred = torch.cat([latent_hist_pred,latent_fut_pred,latent_lane_pred], dim=1)
+
+
+        # 3) stage decoder
+        Nhm, Nfm, Nlm = latent_hist_pred.shape[1], latent_fut_pred.shape[1], latent_lane_pred.shape[1]
+        latent_pred = self.decoder_embed(latent_pred)
+        pos_feat_hist, pos_feat_fut, pos_feat_lane = [], [], []
+        for i, idx in enumerate(hist_masked_ids_list):
+            pos_feat_hist.append(pos_feat[:, :N][i, idx])
+        for i, idx in enumerate(fut_masked_ids_list):
+            pos_feat_fut.append(pos_feat[:, N:2 * N][i,idx])
+        for i, idx in enumerate(lane_ids_masked_list):
+            pos_feat_lane.append(pos_feat[:, 2 * N:][i,idx])
+        pos_feat_hist = pad_sequence(pos_feat_hist, batch_first=True)
+        pos_feat_fut = pad_sequence(pos_feat_fut, batch_first=True)
+        pos_feat_lane = pad_sequence(pos_feat_lane, batch_first=True)
+        pos_feat = torch.cat([pos_feat_hist,pos_feat_fut,pos_feat_lane], dim=1)
+        latent_pred += self.decoder_pos_embed(pos_feat)
+
+        for blk in self.decoder_blocks:
+            #仅将masked tokens解码
+            latent_pred = blk(latent_pred, key_padding_mask=bemasked_key_padding_mask)
+
+        latent_pred = self.decoder_norm(latent_pred)
+        hist_token = latent_pred[:, :Nhm].reshape(-1, self.embed_dim)
+        future_token = latent_pred[:, Nhm: Nhm+Nfm].reshape(-1, self.embed_dim)
+        lane_token = latent_pred[:, -Nlm:]
 
         # lane pred loss
-        lane_pred = self.lane_pred(lane_token).view(B, M, 20, 2)
+        lane_pred = self.lane_pred(lane_token).view(B, Nlm, 20, 2)
         lane_reg_mask = ~lane_padding_mask
         lane_reg_mask[~lane_pred_mask] = False
         #pred point_wise_mask point
-        for i, idx in enumerate(lane_ids_keep_list):
-            lane_reg_mask[i,idx] = lane_pointwise_pred_mask[i,idx,:,0]
+        # for i, idx in enumerate(lane_ids_keep_list):
+        #     lane_reg_mask[i,idx] = lane_pointwise_pred_mask[i,idx,:,0]
+        #对车道lane在仅保留被masked token下的有效值过滤，此时无法使用pointwise mask
+        lane_mask_list = []
+        lane_gt_list = []
+        for i, idx in enumerate(lane_ids_masked_list):
+            lane_mask_list.append(lane_reg_mask[i,idx])
+            lane_gt_list.append(lane_normalized[i,idx])
+        lane_reg_mask = pad_sequence(lane_mask_list,batch_first=True)
+        lane_normalized = pad_sequence(lane_gt_list,batch_first=True)
+
+        # lane_reg_mask = lane_reg_mask[]
         lane_pred_loss = F.mse_loss(
             lane_pred[lane_reg_mask], lane_normalized[lane_reg_mask]
         )
@@ -511,8 +640,12 @@ class ModelMAE(nn.Module):
         x_reg_mask = ~data["x_padding_mask"][:, :, :50]
         x_reg_mask[~hist_pred_mask] = False
         # before_mask = x_reg_mask.clone()
-        for i, idx in enumerate(hist_keep_ids_list):
-            x_reg_mask[i,idx] = hist_pointwise_pred_mask[i,idx,:,0]
+        # for i, idx in enumerate(hist_keep_ids_list):
+        #     x_reg_mask[i,idx] = hist_pointwise_pred_mask[i,idx,:,0]
+        hist_mask_list = []
+        for i, idx in enumerate(hist_masked_ids_list):
+            hist_mask_list.append(x_reg_mask[i, idx])
+        masked_token_hist_valid = pad_sequence(hist_mask_list, batch_first=True).view(-1, 50)
         #vis
         # import matplotlib.pyplot as plt
         # before = before_mask[0, :, :].cpu().detach().numpy()
@@ -526,22 +659,30 @@ class ModelMAE(nn.Module):
         # plt.show()
         x_reg_mask = x_reg_mask.view(-1, 50)
         # print('his_pred_len:',x_hat[x_reg_mask].shape)
-        hist_loss = F.l1_loss(x_hat[x_reg_mask], x[x_reg_mask])
+        hist_loss = F.l1_loss(x_hat[masked_token_hist_valid], x[x_reg_mask])
 
         # future pred loss
         y_hat = self.future_pred(future_token).view(-1, 60, 2)  # B*N, 120
         y = data["y"].view(-1, 60, 2)
         reg_mask = ~data["x_padding_mask"][:, :, 50:]
         reg_mask[~future_pred_mask] = False
-        for i, idx in enumerate(fut_keep_ids_list):
-            reg_mask[i,idx] = fut_pointwise_pred_mask[i,idx,:,0]
+        # for i, idx in enumerate(fut_keep_ids_list):
+        #     reg_mask[i,idx] = fut_pointwise_pred_mask[i,idx,:,0]
+        fut_mask_list = []
+        for i, idx in enumerate(fut_masked_ids_list):
+            fut_mask_list.append(reg_mask[i, idx])
+        masked_token_fut_valid = pad_sequence(fut_mask_list,batch_first=True).view(-1, 60)
         reg_mask = reg_mask.view(-1, 60)
-        future_loss = F.l1_loss(y_hat[reg_mask], y[reg_mask])
+        future_loss = F.l1_loss(y_hat[masked_token_fut_valid], y[reg_mask])
+
+
+        latent_loss = F.mse_loss(latent_pred.float(), bemasked_tokens.detach().float(), reduction="mean")
 
         loss = (
             self.loss_weight[0] * future_loss
             + self.loss_weight[1] * hist_loss
             + self.loss_weight[2] * lane_pred_loss
+            # + latent_loss
         )
 
         # gt_his = (x.view(B, N, 50, 2) + data["x_centers"].unsqueeze(-2)).cpu().detach().numpy()
@@ -641,6 +782,7 @@ class ModelMAE(nn.Module):
             "hist_loss": hist_loss.item(),
             "future_loss": future_loss.item(),
             "lane_pred_loss": lane_pred_loss.item(),
+            "latent_pred_loss": latent_loss.item()
         }
 
 def get_random_masked_pointwise(gt_agents, mask_percentage):

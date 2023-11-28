@@ -7,7 +7,7 @@ target:
   historical_steps: 50
   future_steps: 60
   encoder_depth: 4
-  decoder_depth: 4
+  decoder_depth: 2
   num_heads: 8
   mlp_ratio: 4.0
   qkv_bias: False
